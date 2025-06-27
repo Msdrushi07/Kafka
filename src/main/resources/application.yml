@@ -1,0 +1,18 @@
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: order-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    admin:
+      auto-create: true
+
+#  value-serializer: org.springframework.kafka.support.serializer.JsonSerializer  prducer
+#  value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+# we can specify any group-id name but if we have multiple instances of an service and groupId is same then 
+# messages are distributed as per partiton means different instance have different message same message will not be there for all instance
