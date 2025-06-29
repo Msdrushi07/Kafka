@@ -15,5 +15,18 @@ public class KafkaTopicConfig {
                 .replicas(1)
                 .build();
     }
+    
+ // if the replicas is 1 then for each partion 1 broker (manages the messages) is assigned automatically
+ // if the replicas is 2 then for each partiotions
+//    | Partition | Leader Broker | Follower Broker |
+//    | --------- | ------------- | --------------- |
+//    | **P0**    | **Broker 1**  | Broker 2        |
+//    | **P1**    | **Broker 2**  | Broker 3        |
+//    | **P2**    | **Broker 3**  | Broker 1        |
+//    If Broker 1 fails, then Partition P0’s leader is down Kafka will promote its follower → Broker 2
+// 	Now, Broker 2 is handling:
+//     P0 (just promoted)
+//     P1 (it was already the leader)
+
 }
 
