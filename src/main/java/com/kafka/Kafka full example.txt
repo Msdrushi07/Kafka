@@ -1,0 +1,370 @@
+Event-driven Order System with Kafka (Spring Boot)
+
+A realistic, production-lean example showing who publishes and who consumes across four services:
+
+Order Service (HTTP API) — accepts orders, orchestrates via events (choreography-lite)
+
+Inventory Service — reserves/releases stock
+
+Payment Service — authorizes/captures payment
+
+Notification Service — emails/SMS/push
+
+
+We use topics and event contracts to keep services decoupled. Each service has its own DB and communicates only through Kafka events.
+
+
+---
+
+1) Topics & Ownership
+
+Topic	Key	Produced by	Consumed by	Purpose
+
+orders.v1	orderId	Order Service	Inventory, Payment, Notification	New orders created/updated (e.g., OrderCreated, OrderCancelled)
+inventory.v1	orderId	Inventory Service	Order, Notification	Stock reservation results (InventoryReserved, InventoryReservationFailed)
+payments.v1	orderId	Payment Service	Order, Notification	Payment results (PaymentAuthorized, PaymentFailed)
+fulfillment.v1	orderId	Order Service	Notification	Final state (OrderCompleted, OrderFailed)
+
+
+> Rule: The service that owns the business action produces the event on its domain topic.
+
+
+
+
+---
+
+2) Event Contracts (JSON examples)
+
+2.1 orders.v1
+
+{
+  "type": "OrderCreated",
+  "orderId": "ord_123",
+  "customerId": "cust_9",
+  "items": [{"sku": "SKU-1", "qty": 2}],
+  "total": 1499.00,
+  "currency": "INR",
+  "createdAt": "2025-08-15T10:30:00Z",
+  "traceId": "b5f..."
+}
+
+2.2 inventory.v1
+
+{
+  "type": "InventoryReserved",
+  "orderId": "ord_123",
+  "reservations": [{"sku": "SKU-1", "qty": 2}],
+  "reservedAt": "2025-08-15T10:30:02Z",
+  "traceId": "b5f..."
+}
+
+{
+  "type": "InventoryReservationFailed",
+  "orderId": "ord_123",
+  "reason": "OUT_OF_STOCK",
+  "traceId": "b5f..."
+}
+
+2.3 payments.v1
+
+{
+  "type": "PaymentAuthorized",
+  "orderId": "ord_123",
+  "amount": 1499.00,
+  "currency": "INR",
+  "paymentId": "pay_777",
+  "traceId": "b5f..."
+}
+
+{
+  "type": "PaymentFailed",
+  "orderId": "ord_123",
+  "reason": "CARD_DECLINED",
+  "traceId": "b5f..."
+}
+
+2.4 fulfillment.v1
+
+{
+  "type": "OrderCompleted",
+  "orderId": "ord_123",
+  "traceId": "b5f..."
+}
+
+{
+  "type": "OrderFailed",
+  "orderId": "ord_123",
+  "reason": "PAYMENT_FAILED|OUT_OF_STOCK",
+  "traceId": "b5f..."
+}
+
+> In prod, prefer Avro/Protobuf + Schema Registry. Add headers: type, traceId, correlationId.
+
+
+
+
+---
+
+3) End‑to‑End Flow (Happy Path)
+
+1. Order Service (HTTP POST /orders) persists Order with state PENDING and publishes OrderCreated → orders.v1.
+
+
+2. Inventory Service consumes OrderCreated, reserves stock, persists reservation, and publishes InventoryReserved → inventory.v1.
+
+
+3. Payment Service consumes OrderCreated or (safer, sequential) InventoryReserved. It authorizes payment and publishes PaymentAuthorized → payments.v1.
+
+
+4. Order Service consumes InventoryReserved and PaymentAuthorized (it tracks both flags in its DB). When both done → sets state COMPLETED and publishes OrderCompleted → fulfillment.v1.
+
+
+5. Notification Service consumes from all domain topics to send emails/SMS at appropriate moments.
+
+
+
+Failure/Compensation Paths
+
+If InventoryReservationFailed → Order sets FAILED, publishes OrderFailed, (optional) Payment Service ignores/voids.
+
+If PaymentFailed after reservation → Order sets FAILED, publishes OrderFailed, Inventory releases reservation (reacts to OrderFailed).
+
+
+> This pattern is a Saga (choreography): each service reacts to events and performs the next step, including compensations.
+
+
+
+
+---
+
+4) Spring Boot — Minimal Code per Service
+
+Below are condensed snippets to show producers/consumers. Replace JSON with your serializer (Jackson/Avro).
+
+4.1 Common Gradle/Maven deps
+
+<!-- Order/Inventory/Payment/Notification each include: -->
+<dependency>
+  <groupId>org.springframework.kafka</groupId>
+  <artifactId>spring-kafka</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-validation</artifactId>
+</dependency>
+
+4.2 application.yml (example)
+
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    properties:
+      enable.idempotence: true
+      acks: all
+    consumer:
+      group-id: inventory-svc
+      auto-offset-reset: earliest
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      retries: 10
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+4.3 Order Service
+
+Publishes OrderCreated; Consumes InventoryReserved, PaymentAuthorized; Publishes OrderCompleted/Failed.
+
+// OrderController.java
+@PostMapping("/orders")
+public ResponseEntity<OrderDto> create(@Valid @RequestBody CreateOrderRequest req){
+    Order order = orderService.createPendingOrder(req); // DB: PENDING
+    events.publish("orders.v1", order.getId(), new OrderCreated(order));
+    return ResponseEntity.accepted().body(OrderDto.from(order));
+}
+
+// OrderEvents.java (producer)
+@Service
+@RequiredArgsConstructor
+public class OrderEvents {
+  private final KafkaTemplate<String, String> kafka;
+  private final ObjectMapper om;
+  public void publish(String topic, String key, Object event){
+    try { kafka.send(topic, key, om.writeValueAsString(event)); }
+    catch (JsonProcessingException e) { throw new RuntimeException(e); }
+  }
+}
+
+// OrderSagaListener.java (consumer)
+@Component
+@RequiredArgsConstructor
+public class OrderSagaListener {
+  private final OrderRepository repo;
+  private final OrderEvents events;
+  private final ObjectMapper om;
+
+  @KafkaListener(topics = {"inventory.v1"}, groupId = "order-svc")
+  public void onInventory(String payload, @Header("type") String type) throws Exception {
+    if ("InventoryReserved".equals(type)) {
+      InventoryReserved ev = om.readValue(payload, InventoryReserved.class);
+      repo.markInventoryOk(ev.getOrderId());
+      tryComplete(ev.getOrderId());
+    } else if ("InventoryReservationFailed".equals(type)) {
+      InventoryReservationFailed ev = om.readValue(payload, InventoryReservationFailed.class);
+      repo.markFailed(ev.getOrderId(), "OUT_OF_STOCK");
+      events.publish("fulfillment.v1", ev.getOrderId(), new OrderFailed(ev.getOrderId(), "OUT_OF_STOCK"));
+    }
+  }
+
+  @KafkaListener(topics = {"payments.v1"}, groupId = "order-svc")
+  public void onPayment(String payload, @Header("type") String type) throws Exception {
+    if ("PaymentAuthorized".equals(type)) {
+      PaymentAuthorized ev = om.readValue(payload, PaymentAuthorized.class);
+      repo.markPaymentOk(ev.getOrderId());
+      tryComplete(ev.getOrderId());
+    } else if ("PaymentFailed".equals(type)) {
+      PaymentFailed ev = om.readValue(payload, PaymentFailed.class);
+      repo.markFailed(ev.getOrderId(), "PAYMENT_FAILED");
+      events.publish("fulfillment.v1", ev.getOrderId(), new OrderFailed(ev.getOrderId(), "PAYMENT_FAILED"));
+    }
+  }
+
+  private void tryComplete(String orderId){
+    repo.findById(orderId).filter(o -> o.isInventoryOk() && o.isPaymentOk()).ifPresent(o -> {
+      o.setStatus(OrderStatus.COMPLETED);
+      repo.save(o);
+      events.publish("fulfillment.v1", orderId, new OrderCompleted(orderId));
+    });
+  }
+}
+
+4.4 Inventory Service
+
+Consumes OrderCreated; Publishes reservation result.
+
+@Component
+@RequiredArgsConstructor
+public class InventoryListener {
+  private final InventoryDomain domain; // checks stock, reserves
+  private final KafkaTemplate<String, String> kafka;
+  private final ObjectMapper om;
+
+  @KafkaListener(topics = "orders.v1", groupId = "inventory-svc")
+  public void onOrderCreated(String payload, @Header("type") String type) throws Exception {
+    if (!"OrderCreated".equals(type)) return;
+    OrderCreated ev = om.readValue(payload, OrderCreated.class);
+    boolean reserved = domain.tryReserve(ev.getOrderId(), ev.getItems());
+    Object out = reserved ? new InventoryReserved(ev.getOrderId(), ev.getItems())
+                          : new InventoryReservationFailed(ev.getOrderId(), "OUT_OF_STOCK");
+    kafka.send("inventory.v1", ev.getOrderId(), om.writeValueAsString(out));
+  }
+}
+
+4.5 Payment Service
+
+Consumes InventoryReserved (or OrderCreated if you want parallelization); Publishes payment result.
+
+@Component
+@RequiredArgsConstructor
+public class PaymentListener {
+  private final PaymentGateway gateway;
+  private final KafkaTemplate<String, String> kafka;
+  private final ObjectMapper om;
+
+  @KafkaListener(topics = "inventory.v1", groupId = "payment-svc")
+  public void onInventory(String payload, @Header("type") String type) throws Exception {
+    if (!"InventoryReserved".equals(type)) return;
+    InventoryReserved ev = om.readValue(payload, InventoryReserved.class);
+    PaymentResult pr = gateway.authorize(ev.getOrderId());
+    Object out = pr.isOk() ? new PaymentAuthorized(ev.getOrderId(), pr.getAmount(), pr.getPaymentId())
+                           : new PaymentFailed(ev.getOrderId(), pr.getReason());
+    kafka.send("payments.v1", ev.getOrderId(), om.writeValueAsString(out));
+  }
+}
+
+4.6 Notification Service
+
+Consumes from all topics and sends email/SMS.
+
+@Component
+@RequiredArgsConstructor
+public class NotificationListener {
+  private final Mailer mailer;
+
+  @KafkaListener(topics = {"orders.v1","inventory.v1","payments.v1","fulfillment.v1"}, groupId = "notification-svc")
+  public void onAny(String payload, @Header("type") String type) {
+    // Inspect type and send appropriate notification
+  }
+}
+
+
+---
+
+5) Reliability Patterns (Prod‑ready)
+
+Idempotency: Use orderId as key; make handlers idempotent (upserts with unique constraints). Store a processed_event_id table to ignore duplicates.
+
+Outbox Pattern: Write event to an outbox table in the same DB transaction as state change; a background publisher relays to Kafka. Prevents lost events.
+
+Consumer Groups & Partitions: Key by orderId so all events for an order go to the same partition; scale consumers horizontally.
+
+Exactly‑once semantics: Enable producer idempotence + transactions if you need atomic write-to-DB-and-produce (or leverage outbox).
+
+Retries & DLQ: Configure max.poll.interval.ms, seekToCurrentErrorHandler (Spring Kafka) or new DefaultErrorHandler with DLQ topics like payments.dlq.v1.
+
+Observability: Add traceId to headers; export metrics (consumer lag, success/fail counts) to Prometheus + Grafana; centralize logs.
+
+
+
+---
+
+6) Who Publishes vs Who Consumes (Cheat Sheet)
+
+Order Service: Publishes OrderCreated, OrderCompleted/Failed; Consumes InventoryReserved/Failed, PaymentAuthorized/Failed.
+
+Inventory Service: Consumes OrderCreated; Publishes InventoryReserved/Failed; Consumes OrderFailed (to release holds).
+
+Payment Service: Consumes InventoryReserved (or OrderCreated); Publishes PaymentAuthorized/Failed; Consumes OrderFailed (to void/cancel).
+
+Notification Service: Consumes everything; Publishes nothing.
+
+
+
+---
+
+7) Local Dev Tips
+
+Start Kafka quickly with docker-compose (Redpanda/Bitnami images work well).
+
+Use a schema registry for evolvable contracts.
+
+Include contract tests for event payloads.
+
+Seed realistic data and run a happy-path + compensation-path test.
+
+
+
+---
+
+8) docker-compose (dev example)
+
+version: "3.9"
+services:
+  kafka:
+    image: bitnami/kafka:3.7
+    ports: ["9092:9092"]
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
+
+
+---
+
+Wrap‑up
+
+This setup gives you a clean, testable event-driven flow: each service owns its domain logic, publishes results, and reacts to others — no tight coupling, and failures trigger compensations automatically. Copy the snippets into separate Spring Boot services and you’ll have a working skeleton you can extend.
+
