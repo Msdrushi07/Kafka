@@ -171,6 +171,9 @@ spring:
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
 
+spring.kafka.producer.retries: 5
+spring.kafka.producer.properties.retry.backoff.ms: 1000
+
 4.3 Order Service
 
 Publishes OrderCreated; Consumes InventoryReserved, PaymentAuthorized; Publishes OrderCompleted/Failed.
@@ -367,4 +370,287 @@ services:
 Wrap‑up
 
 This setup gives you a clean, testable event-driven flow: each service owns its domain logic, publishes results, and reacts to others — no tight coupling, and failures trigger compensations automatically. Copy the snippets into separate Spring Boot services and you’ll have a working skeleton you can extend.
+
+
+Producer Side Issues
+
+1. Broker Unavailability (message not published)
+
+Problem: Producer cannot reach Kafka brokers.
+
+Solution:
+
+Configure retries with exponential backoff:
+
+spring.kafka.producer.retries: 5
+spring.kafka.producer.properties.retry.backoff.ms: 1000
+
+Use acks=all (wait for replication).
+
+Use Kafka bootstrap servers list with multiple brokers, not just one.
+
+
+
+
+---
+
+2. Serialization Errors
+
+Problem: Object → JSON/Avro serialization fails.
+
+Solution:
+
+Use proper serializers in Spring Boot:
+
+spring.kafka.producer.value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+Add schema validation (Avro + Schema Registry).
+
+
+
+
+---
+
+3. Message Loss (acks misconfigured)
+
+Problem: Messages acknowledged too early.
+
+Solution:
+
+Set acks=all for strong durability.
+
+Enable idempotence to avoid duplicates:
+
+spring.kafka.producer.properties.enable.idempotence: true
+
+
+
+
+---
+
+4. Message Duplication
+
+Problem: Retries without idempotence cause duplicates.
+
+Solution:
+
+Use idempotent producers (enable.idempotence=true).
+
+Ensure deduplication logic in consumers if required.
+
+
+
+
+---
+
+5. Throughput Bottleneck
+
+Problem: Producer too slow.
+
+Solution:
+
+Tune batching:
+
+spring.kafka.producer.properties.linger.ms: 5
+spring.kafka.producer.properties.batch.size: 32768
+
+Use compression (compression.type: snappy or lz4).
+
+
+
+
+---
+
+🔹 Consumer Side Issues
+
+6. Consumer Not Consuming
+
+Problem: Wrong group ID, topic mismatch, subscription issue.
+
+Solution:
+
+Use unique group.id.
+
+Check topic exists via kafka-topics.sh --describe.
+
+
+
+
+---
+
+7. Offset Mismanagement
+
+Problem: Messages reprocessed or skipped.
+
+Solution:
+
+Disable auto-commit and use manual acknowledgment:
+
+@KafkaListener(topics = "orders")
+public void listen(String msg, Acknowledgment ack) {
+    try {
+        process(msg);
+        ack.acknowledge(); // commit offset only if success
+    } catch (Exception e) {
+        // retry or send to DLQ
+    }
+}
+
+
+
+
+---
+
+8. Consumer Lag
+
+Problem: Consumer slower than producer.
+
+Solution:
+
+Scale consumers (increase partitions + consumer count).
+
+Tune max.poll.records and fetch.min.bytes.
+
+Monitor lag using Kafka Exporter + Prometheus + Grafana.
+
+
+
+
+---
+
+9. Deserialization Errors
+
+Problem: Consumer cannot parse message.
+
+Solution:
+
+Use Spring Kafka’s ErrorHandlingDeserializer:
+
+spring.kafka.consumer.value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+spring.kafka.consumer.properties.spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+
+Add schema evolution rules if using Avro.
+
+
+
+
+---
+
+10. Poison Pill Messages (crash loop)
+
+Problem: A bad message keeps crashing consumer.
+
+Solution:
+
+Configure a Dead Letter Topic (DLT) in Spring Kafka:
+
+spring.kafka.listener.default-error-handler-dlq: true
+
+Or use a SeekToCurrentErrorHandler in code:
+
+@Bean
+public DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
+    return new DefaultErrorHandler(new DeadLetterPublishingRecoverer(template), new FixedBackOff(1000L, 3));
+}
+
+This retries 3 times, then sends bad messages to DLT.
+
+
+
+
+---
+
+11. Rebalancing Issues
+
+Problem: Frequent rebalances → downtime.
+
+Solution:
+
+Use static group membership:
+
+spring.kafka.consumer.properties.group.instance.id: consumer-1
+
+Tune session timeouts:
+
+spring.kafka.consumer.properties.session.timeout.ms: 30000
+spring.kafka.consumer.properties.max.poll.interval.ms: 300000
+
+
+
+
+---
+
+🔹 System/Infra Issues
+
+12. Leader Not Available / Network Issues
+
+Solution: Retries + multiple brokers in bootstrap.
+
+
+
+---
+
+13. Disk Full (retention issues)
+
+Solution:
+
+Monitor disk usage.
+
+Use retention policies:
+
+log.retention.hours=168   # 7 days
+log.segment.bytes=1073741824
+
+
+
+
+---
+
+14. Data Skew (uneven partition load)
+
+Solution:
+
+Choose partition key wisely (e.g., userId, orderId).
+
+Avoid always sending to partition-0.
+
+Use custom partitioner if needed.
+
+
+
+
+---
+
+⚙️ Retry Mechanisms in Spring Boot + Kafka
+
+Producer Retry (built-in)
+
+Kafka producer retries are automatic with:
+
+spring.kafka.producer.retries: 5
+spring.kafka.producer.properties.retry.backoff.ms: 1000
+
+Consumer Retry + DLQ
+
+Spring Kafka provides DefaultErrorHandler:
+
+@Bean
+public DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
+    // retry 2 times, then send to DLQ
+    return new DefaultErrorHandler(
+        new DeadLetterPublishingRecoverer(template), 
+        new FixedBackOff(2000L, 2)
+    );
+}
+
+
+---
+
+✅ So, if I summarize:
+
+Producer side: retries + idempotence + correct ack.
+
+Consumer side: manual ack + error handler + DLQ.
+
+Infra side: partition strategy + monitoring (Prometheus + Grafana).
 
