@@ -261,5 +261,136 @@ kafka-topics.sh --create --topic orders --partitions 3 --replication-factor 1 --
 # Create DLQ topic
 kafka-topics.sh --create --topic orders.DLT --partitions 3 --replication-factor 1 --bootstrap-server localhost:9092
 
+Perfect 👌 Rushi — here’s a starter Grafana dashboard JSON you can directly import.
+This dashboard focuses on Kafka consumer lag, throughput, and DLQ monitoring for your Spring Boot + Micrometer + Prometheus setup.
+
+
+---
+
+📊 Grafana Dashboard JSON (Kafka Consumer Monitoring)
+
+{
+  "id": null,
+  "title": "Kafka Consumer Monitoring",
+  "tags": ["kafka", "spring-boot", "prometheus"],
+  "timezone": "browser",
+  "schemaVersion": 16,
+  "version": 1,
+  "panels": [
+    {
+      "type": "graph",
+      "title": "Consumer Lag per Topic",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "kafka_consumer_records_lag",
+          "legendFormat": "{{topic}} - {{client_id}}",
+          "refId": "A"
+        }
+      ],
+      "lines": true,
+      "linewidth": 2
+    },
+    {
+      "type": "graph",
+      "title": "Messages Consumed per Second",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(kafka_consumer_records_consumed_total[1m])",
+          "legendFormat": "{{topic}}",
+          "refId": "B"
+        }
+      ],
+      "lines": true,
+      "linewidth": 2
+    },
+    {
+      "type": "graph",
+      "title": "Messages Published per Second",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(kafka_producer_record_send_total[1m])",
+          "legendFormat": "{{topic}}",
+          "refId": "C"
+        }
+      ],
+      "lines": true,
+      "linewidth": 2
+    },
+    {
+      "type": "graph",
+      "title": "DLQ Messages Rate",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "increase(kafka_consumer_records_consumed_total{topic=\"orders.DLT\"}[5m])",
+          "legendFormat": "orders.DLT",
+          "refId": "D"
+        }
+      ],
+      "lines": true,
+      "linewidth": 2
+    },
+    {
+      "type": "singlestat",
+      "title": "Consumer App Up",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "up{job=\"spring-kafka-app\"}",
+          "refId": "E"
+        }
+      ],
+      "colorBackground": true,
+      "colors": ["#d44a3a", "rgba(237, 129, 40, 0.89)", "#299c46"],
+      "valueName": "max",
+      "thresholds": "0,1"
+    }
+  ]
+}
+
+
+---
+
+🔹 What This Dashboard Shows
+
+1. Consumer Lag per Topic → shows if consumers are falling behind.
+
+
+2. Messages Consumed/sec → throughput of your consumers.
+
+
+3. Messages Published/sec → throughput of producers.
+
+
+4. DLQ Messages Rate → spikes mean errors are happening.
+
+
+5. Consumer App Up → checks if your Spring Boot Kafka app is alive.
+
+
+
+
+---
+
+🚀 Steps to Import
+
+1. Go to Grafana → Dashboards → + → Import.
+
+
+2. Paste the JSON above or upload as a file.
+
+
+3. Select your Prometheus datasource.
+
+
+4. Done 🎉 — you’ll see live Kafka monitoring!
+
+
+
+
+
 
 
