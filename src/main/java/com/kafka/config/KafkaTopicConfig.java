@@ -16,6 +16,12 @@ public class KafkaTopicConfig {
                 .build();
     }
     
+    
+    @Bean
+    public NewTopic ordersDltTopic() {
+        return new NewTopic("orders.DLT", 3, (short) 1);
+    }
+    
  // if the replicas is 1 then for each partion 1 broker (manages the messages) is assigned automatically
  // if the replicas is 2 then for each partiotions
 //    | Partition | Leader Broker | Follower Broker |
