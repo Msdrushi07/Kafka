@@ -1,0 +1,366 @@
+Perfect 👍 now let’s extend the DROID-style multi-storage fan-out:
+
+📌 One Kafka event (TradeEvent) → 3 different storages
+
+Oracle (transactional storage – source of truth)
+
+Elasticsearch (fast search)
+
+S3 (raw event archival)
+
+
+
+---
+
+🔹 Flow
+
+1. Producer sends TradeEvent → Kafka topic (trade-events).
+
+
+2. DROID consumer(s) subscribe.
+
+
+3. Storage services write data to:
+
+Oracle (with @Transactional)
+
+Elasticsearch (via Spring Data ES / REST client)
+
+S3 (via AWS SDK).
+
+
+
+
+
+---
+
+🔹 1. Oracle (Transactional Storage)
+
+We already built this ✅ in previous step:
+
+@Service
+public class TradeStorageService {
+    private final TradeRepository tradeRepository;
+    private final SettlementRepository settlementRepository;
+
+    @Transactional
+    public void storeEvent(TradeEvent event) {
+        Trade trade = new Trade();
+        trade.setTradeId(event.getTradeId());
+        trade.setAmount(event.getAmount());
+        trade.setStatus("BOOKED");
+
+        Settlement settlement = new Settlement();
+        settlement.setSettlementId(event.getSettlementId());
+        settlement.setTradeId(event.getTradeId());
+        settlement.setStatus(event.getSettlementStatus());
+
+        tradeRepository.save(trade);
+
+        if ("FAIL".equals(event.getSettlementStatus())) {
+            throw new RuntimeException("Settlement failed!");
+        }
+
+        settlementRepository.save(settlement);
+    }
+}
+
+
+---
+
+🔹 2. Elasticsearch Storage
+
+We keep a lightweight index copy of the trade for searching.
+
+import org.springframework.data.annotation.Id;
+import org.springframework.data.elasticsearch.annotations.Document;
+
+@Document(indexName = "trades")
+public class TradeIndex {
+    @Id
+    private String tradeId;
+    private Double amount;
+    private String settlementStatus;
+    // getters/setters
+}
+
+Repository:
+
+public interface TradeIndexRepository extends ElasticsearchRepository<TradeIndex, String> {}
+
+Service:
+
+@Service
+public class ElasticsearchStorageService {
+
+    private final TradeIndexRepository tradeIndexRepository;
+
+    public ElasticsearchStorageService(TradeIndexRepository repo) {
+        this.tradeIndexRepository = repo;
+    }
+
+    public void indexEvent(TradeEvent event) {
+        TradeIndex doc = new TradeIndex();
+        doc.setTradeId(event.getTradeId());
+        doc.setAmount(event.getAmount());
+        doc.setSettlementStatus(event.getSettlementStatus());
+        tradeIndexRepository.save(doc);
+    }
+}
+
+
+---
+
+🔹 3. S3 Storage (Raw Avro Event Archival)
+
+Here we dump the raw JSON/Avro event for audit/compliance.
+
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import org.springframework.stereotype.Service;
+import java.nio.charset.StandardCharsets;
+
+@Service
+public class S3StorageService {
+    private final AmazonS3 s3Client;
+    private final String bucketName = "droid-trades-archive";
+
+    public S3StorageService(AmazonS3 s3Client) {
+        this.s3Client = s3Client;
+    }
+
+    public void archiveEvent(TradeEvent event) {
+        String key = "trades/" + event.getTradeId() + ".json";
+        String content = event.toString(); // or use Jackson to serialize JSON
+
+        ObjectMetadata metadata = new ObjectMetadata();
+        metadata.setContentLength(content.length());
+
+        s3Client.putObject(bucketName, key,
+                new java.io.ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)),
+                metadata);
+    }
+}
+
+
+---
+
+🔹 4. Orchestration (Kafka Consumer)
+
+Now our DROID consumer calls all 3 storages.
+
+@Service
+public class TradeConsumer {
+
+    private final TradeStorageService oracleStorage;
+    private final ElasticsearchStorageService esStorage;
+    private final S3StorageService s3Storage;
+
+    public TradeConsumer(TradeStorageService oracleStorage,
+                         ElasticsearchStorageService esStorage,
+                         S3StorageService s3Storage) {
+        this.oracleStorage = oracleStorage;
+        this.esStorage = esStorage;
+        this.s3Storage = s3Storage;
+    }
+
+    @KafkaListener(topics = "trade-events", groupId = "droid-consumer")
+    public void consume(TradeEvent event) {
+        try {
+            // ✅ 1. Save in Oracle with transaction
+            oracleStorage.storeEvent(event);
+
+            // ✅ 2. Index into Elasticsearch
+            esStorage.indexEvent(event);
+
+            // ✅ 3. Archive raw event into S3
+            s3Storage.archiveEvent(event);
+
+            System.out.println("Stored in Oracle, ES, and archived in S3: " + event.getTradeId());
+
+        } catch (Exception e) {
+            System.err.println("Error processing event " + event.getTradeId() + ": " + e.getMessage());
+            // Could send to DLQ (Dead Letter Queue) for retry
+        }
+    }
+}
+
+
+---
+
+🔹 Key Points
+
+Oracle → Transactional (source of truth, strong consistency).
+
+Elasticsearch → Fast search & analytics (eventually consistent).
+
+S3 → Cheap, durable archive for raw events.
+
+
+👉 Same event is not duplicated manually by producer — instead, Kafka allows multiple consumers (Oracle/ES/S3 services).
+
+
+---
+
+⚖️ In a real DROID system:
+
+Oracle consumer might run in transactional mode.
+
+Elasticsearch consumer might run asynchronously (eventually consistent).
+
+S3 archival consumer might batch events for cost savings.
+
+
+
+---
+
+Would you like me to also show this with multiple consumer groups (one group for Oracle, one for ES, one for S3) instead of a single consumer calling all 3? This is how DROID achieves true decoupling.
+
+Great 👍 now let’s move from the single consumer calling all 3 storages → to the real-world decoupled pattern with multiple consumer groups.
+
+This is how DROID achieves scalability + loose coupling.
+
+
+---
+
+🔹 Why Multiple Consumer Groups?
+
+Oracle consumer group → ensures strong transactional consistency.
+
+Elasticsearch consumer group → can fail/retry independently, doesn’t affect Oracle.
+
+S3 consumer group → can archive events at its own pace.
+
+
+📌 Same Kafka topic (trade-events) → 3 different consumer groups.
+Each consumer group has its own offset tracking, so they work independently.
+
+
+---
+
+🔹 Flow
+
+Producer → Kafka topic: trade-events
+          ↙           ↓           ↘
+   Consumer Group 1   Consumer Group 2   Consumer Group 3
+   (Oracle Service)  (Elasticsearch)    (S3 Archival)
+
+
+---
+
+🔹 1. Oracle Consumer
+
+@Service
+public class OracleConsumer {
+
+    private final TradeStorageService oracleStorage;
+
+    public OracleConsumer(TradeStorageService oracleStorage) {
+        this.oracleStorage = oracleStorage;
+    }
+
+    @KafkaListener(topics = "trade-events", groupId = "oracle-consumer")
+    public void consume(TradeEvent event) {
+        try {
+            oracleStorage.storeEvent(event);
+            System.out.println("Stored in Oracle: " + event.getTradeId());
+        } catch (Exception e) {
+            System.err.println("Oracle write failed: " + e.getMessage());
+            // Send to DLQ or retry
+        }
+    }
+}
+
+
+---
+
+🔹 2. Elasticsearch Consumer
+
+@Service
+public class ElasticsearchConsumer {
+
+    private final ElasticsearchStorageService esStorage;
+
+    public ElasticsearchConsumer(ElasticsearchStorageService esStorage) {
+        this.esStorage = esStorage;
+    }
+
+    @KafkaListener(topics = "trade-events", groupId = "elasticsearch-consumer")
+    public void consume(TradeEvent event) {
+        try {
+            esStorage.indexEvent(event);
+            System.out.println("Indexed in Elasticsearch: " + event.getTradeId());
+        } catch (Exception e) {
+            System.err.println("ES indexing failed: " + e.getMessage());
+            // Optionally retry / DLQ
+        }
+    }
+}
+
+
+---
+
+🔹 3. S3 Consumer
+
+@Service
+public class S3Consumer {
+
+    private final S3StorageService s3Storage;
+
+    public S3Consumer(S3StorageService s3Storage) {
+        this.s3Storage = s3Storage;
+    }
+
+    @KafkaListener(topics = "trade-events", groupId = "s3-consumer")
+    public void consume(TradeEvent event) {
+        try {
+            s3Storage.archiveEvent(event);
+            System.out.println("Archived to S3: " + event.getTradeId());
+        } catch (Exception e) {
+            System.err.println("S3 archival failed: " + e.getMessage());
+            // Could retry later / batch store
+        }
+    }
+}
+
+
+---
+
+🔹 Key Differences (Single Consumer vs Multi-Group)
+
+Pattern	Pros	Cons
+
+Single Consumer calling all 3	Simple to implement, single transaction boundary	If ES/S3 fails, Oracle write may also get delayed/blocked
+Multiple Consumer Groups ✅ (real-world DROID)	Decoupled, scalable independently, one failure doesn’t affect others	More infra (3 services), eventual consistency (ES/S3 may lag behind Oracle)
+
+
+
+---
+
+🔹 Example Timeline
+
+1. Producer sends TradeEvent (T123).
+
+
+2. Oracle consumer commits immediately → ✅ strong consistency.
+
+
+3. Elasticsearch consumer may index later (async) → searchable within seconds.
+
+
+4. S3 consumer archives raw Avro → available for compliance.
+
+
+
+So, Oracle is source of truth, while ES + S3 are eventually consistent copies.
+
+
+---
+
+⚖️ This is exactly why you saw earlier that the same data exists in 3 storages — but the role of each storage is different.
+
+
+---
+
+👉 Rushi, do you want me to now also show you how to configure Kafka consumer groups in application.yml so that Oracle, ES, and S3 consumers run completely independently?
+
