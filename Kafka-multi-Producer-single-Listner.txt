@@ -1,0 +1,167 @@
+Perfect 👌 let’s set up a Spring Boot consumer service that listens to two different Kafka clusters at the same time.
+
+
+---
+
+🔹 1. application.yml
+
+Here we define two clusters under different prefixes:
+
+spring:
+  kafka:
+    cluster1:
+      bootstrap-servers: localhost:9092
+      consumer:
+        group-id: group-cluster1
+        auto-offset-reset: earliest
+        key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+        value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+    cluster2:
+      bootstrap-servers: localhost:9093
+      consumer:
+        group-id: group-cluster2
+        auto-offset-reset: earliest
+        key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+        value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+⚡ Notice: we don’t use the default spring.kafka directly. Instead, we separate configs for cluster1 and cluster2.
+
+
+---
+
+🔹 2. Java Config (Multiple Factories)
+
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@Configuration
+public class MultiKafkaConsumerConfig {
+
+    // ----- Cluster 1 -----
+    @Value("${spring.kafka.cluster1.bootstrap-servers}")
+    private String cluster1Bootstrap;
+
+    @Value("${spring.kafka.cluster1.consumer.group-id}")
+    private String cluster1GroupId;
+
+    @Bean
+    public ConsumerFactory<String, String> cluster1ConsumerFactory() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, cluster1Bootstrap);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, cluster1GroupId);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, String> cluster1KafkaListenerContainerFactory() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(cluster1ConsumerFactory());
+        return factory;
+    }
+
+    // ----- Cluster 2 -----
+    @Value("${spring.kafka.cluster2.bootstrap-servers}")
+    private String cluster2Bootstrap;
+
+    @Value("${spring.kafka.cluster2.consumer.group-id}")
+    private String cluster2GroupId;
+
+    @Bean
+    public ConsumerFactory<String, String> cluster2ConsumerFactory() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, cluster2Bootstrap);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, cluster2GroupId);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, String> cluster2KafkaListenerContainerFactory() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(cluster2ConsumerFactory());
+        return factory;
+    }
+}
+
+
+---
+
+🔹 3. Kafka Listeners
+
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.stereotype.Service;
+
+@Service
+public class MultiClusterConsumerService {
+
+    @KafkaListener(
+        topics = "orders", 
+        containerFactory = "cluster1KafkaListenerContainerFactory"
+    )
+    public void consumeFromCluster1(String message) {
+        System.out.println("Cluster 1 - orders: " + message);
+    }
+
+    @KafkaListener(
+        topics = "payments", 
+        containerFactory = "cluster2KafkaListenerContainerFactory"
+    )
+    public void consumeFromCluster2(String message) {
+        System.out.println("Cluster 2 - payments: " + message);
+    }
+}
+
+
+---
+
+🔹 How this works
+
+Cluster 1:
+
+Producers publish to topic orders on Kafka running at localhost:9092.
+
+Consumer picks it up via cluster1KafkaListenerContainerFactory.
+
+
+Cluster 2:
+
+Producers publish to topic payments on Kafka running at localhost:9093.
+
+Consumer picks it up via cluster2KafkaListenerContainerFactory.
+
+
+
+👉 One microservice, two Kafka clusters, completely separate.
+
+
+---
+
+✅ Summary
+
+Yes, a single Spring Boot microservice can consume from multiple Kafka clusters.
+
+The trick: define multiple consumer factories + listener container factories, one per cluster.
+
+Then assign each listener to the correct factory.
+
+
+
+---
+
+Do you also want me to extend this example so that one listener consumes from multiple topics inside the same cluster, while another listens to a different cluster? That’s a very common real-world pattern.
+
