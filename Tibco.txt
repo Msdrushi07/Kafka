@@ -1,0 +1,394 @@
+Absolutely, Rushi! Let’s create a full working example similar to Kafka but using Tibco EMS in a Spring Boot application. I’ll cover producer, consumer, and configuration from scratch.
+
+
+---
+
+1️⃣ Dependencies
+
+In your build.gradle (or pom.xml if Maven):
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-activemq' // JMS support
+    implementation files('libs/tibjms.jar') // Tibco EMS client library
+}
+
+> ⚠️ You need tibjms.jar from TIBCO EMS installation. Place it in libs/.
+
+
+
+
+---
+
+2️⃣ Configuration
+
+Create a configuration class for Tibco ConnectionFactory:
+
+@Configuration
+public class TibcoConfig {
+
+    @Bean
+    public ConnectionFactory connectionFactory() {
+        TibjmsConnectionFactory factory = new TibjmsConnectionFactory();
+        factory.setServerUrl("tcp://localhost:7222"); // EMS server
+        factory.setUserName("admin");
+        factory.setUserPassword("admin");
+        return factory;
+    }
+
+    @Bean
+    public JmsTemplate jmsTemplate(ConnectionFactory connectionFactory) {
+        return new JmsTemplate(connectionFactory);
+    }
+}
+
+Replace localhost:7222 with your EMS server URL.
+
+User/password is EMS login credentials.
+
+
+
+---
+
+3️⃣ Producer Example
+
+@Component
+public class TibcoProducer {
+
+    private final JmsTemplate jmsTemplate;
+
+    public TibcoProducer(JmsTemplate jmsTemplate) {
+        this.jmsTemplate = jmsTemplate;
+    }
+
+    public void sendMessage(String queueName, String message) {
+        jmsTemplate.convertAndSend(queueName, message);
+        System.out.println("Sent message: " + message);
+    }
+}
+
+
+---
+
+4️⃣ Consumer Example
+
+@Component
+public class TibcoConsumer {
+
+    @JmsListener(destination = "DROID.QUEUE", containerFactory = "jmsListenerContainerFactory")
+    public void receiveMessage(String message) {
+        System.out.println("Received message: " + message);
+        // Process the message
+    }
+
+    @Bean
+    public DefaultJmsListenerContainerFactory jmsListenerContainerFactory(ConnectionFactory connectionFactory) {
+        DefaultJmsListenerContainerFactory factory = new DefaultJmsListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        factory.setConcurrency("1-1"); // 1 consumer
+        factory.setPubSubDomain(false); // false for Queue, true for Topic
+        return factory;
+    }
+}
+
+
+---
+
+5️⃣ Application Runner to Test
+
+@SpringBootApplication
+public class TibcoApp implements CommandLineRunner {
+
+    private final TibcoProducer producer;
+
+    public TibcoApp(TibcoProducer producer) {
+        this.producer = producer;
+    }
+
+    public static void main(String[] args) {
+        SpringApplication.run(TibcoApp.class, args);
+    }
+
+    @Override
+    public void run(String... args) throws Exception {
+        producer.sendMessage("DROID.QUEUE", "Hello from Tibco EMS!");
+    }
+}
+
+
+---
+
+✅ Flow
+
+1. TibcoProducer sends message → EMS Queue DROID.QUEUE.
+
+
+2. EMS stores message until a consumer reads it.
+
+
+3. TibcoConsumer listens via @JmsListener → processes message.
+
+
+4. Works similar to Kafka Producer → Topic → Consumer, but EMS handles transactional, reliable delivery.
+
+
+
+
+---
+
+Optional Enhancements:
+
+Use Topics instead of Queue → factory.setPubSubDomain(true) for pub-sub model.
+
+Enable persistent messages for reliability:
+
+
+jmsTemplate.setDeliveryMode(DeliveryMode.PERSISTENT);
+
+Use Transactions in JMS:
+
+
+DefaultJmsListenerContainerFactory factory = new DefaultJmsListenerContainerFactory();
+factory.setSessionTransacted(true);
+
+
+---
+
+Rushi, if you want, I can also create a full demo with multiple consumers showing queue vs topic behavior, similar to Kafka’s multiple consumer groups. That will make it look exactly like a Kafka flow.
+
+Do you want me to do that next?
+
+
+Perfect, Rushi 🙌 Let’s go step by step. I’ll explain the terms, the messaging flow, and then show you Queue vs Topic example in Spring Boot with Tibco EMS.
+
+
+---
+
+🔹 1. Key Terms in Tibco EMS
+
+Term	Meaning	Kafka Analogy
+
+Queue	Point-to-point channel where each message is consumed by only one consumer.	Like a partition in a Kafka topic consumed by one consumer in a group.
+Topic	Publish-Subscribe channel where each subscriber gets a copy of the message.	Like Kafka topic delivered to multiple consumer groups.
+Producer	Application that sends messages.	Kafka Producer
+Consumer	Application that receives messages.	Kafka Consumer
+Connection Factory	Object that creates connections to EMS server.	Kafka bootstrap servers config
+Destination	Logical endpoint (Queue or Topic)	Kafka topic name
+Persistent Delivery	Message is stored safely until consumed.	Kafka default persistence
+Non-Persistent Delivery	Faster, but can be lost if broker crashes.	Kafka with acks=0
+
+
+
+---
+
+🔹 2. Flow
+
+Queue Flow (Point-to-Point)
+
+1. Producer sends a message to ORDERS.QUEUE.
+
+
+2. EMS broker stores the message.
+
+
+3. One consumer from the queue receives it.
+
+If multiple consumers are listening → EMS load-balances among them.
+
+
+
+
+👉 Used when each message should be processed once by only one system.
+
+
+---
+
+Topic Flow (Publish-Subscribe)
+
+1. Producer publishes a message to MARKET.TOPIC.
+
+
+2. EMS broker distributes the message to all active subscribers.
+
+
+3. Every subscriber receives its own copy.
+
+If durable subscriber → message is stored for offline clients until they reconnect.
+
+
+
+
+👉 Used when all consumers should see the same event.
+
+
+---
+
+🔹 3. Spring Boot Example: Queue vs Topic
+
+✅ Configuration
+
+@Configuration
+public class TibcoConfig {
+
+    @Bean
+    public ConnectionFactory connectionFactory() {
+        TibjmsConnectionFactory factory = new TibjmsConnectionFactory();
+        factory.setServerUrl("tcp://localhost:7222");
+        factory.setUserName("admin");
+        factory.setUserPassword("admin");
+        return factory;
+    }
+
+    @Bean
+    public JmsTemplate jmsTemplate(ConnectionFactory connectionFactory) {
+        return new JmsTemplate(connectionFactory);
+    }
+
+    // Listener for Queues
+    @Bean
+    public DefaultJmsListenerContainerFactory queueListenerFactory(ConnectionFactory connectionFactory) {
+        DefaultJmsListenerContainerFactory factory = new DefaultJmsListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        factory.setPubSubDomain(false); // Queue mode
+        return factory;
+    }
+
+    // Listener for Topics
+    @Bean
+    public DefaultJmsListenerContainerFactory topicListenerFactory(ConnectionFactory connectionFactory) {
+        DefaultJmsListenerContainerFactory factory = new DefaultJmsListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        factory.setPubSubDomain(true); // Topic mode
+        return factory;
+    }
+}
+
+
+---
+
+✅ Producer
+
+@Component
+public class TibcoProducer {
+
+    private final JmsTemplate jmsTemplate;
+
+    public TibcoProducer(JmsTemplate jmsTemplate) {
+        this.jmsTemplate = jmsTemplate;
+    }
+
+    // Send to Queue
+    public void sendToQueue(String message) {
+        jmsTemplate.convertAndSend("ORDERS.QUEUE", message);
+        System.out.println("Sent to Queue: " + message);
+    }
+
+    // Send to Topic
+    public void sendToTopic(String message) {
+        jmsTemplate.setPubSubDomain(true); // switch to topic
+        jmsTemplate.convertAndSend("MARKET.TOPIC", message);
+        System.out.println("Sent to Topic: " + message);
+        jmsTemplate.setPubSubDomain(false); // reset back to queue
+    }
+}
+
+
+---
+
+✅ Consumers
+
+@Component
+public class TibcoQueueConsumer {
+
+    @JmsListener(destination = "ORDERS.QUEUE", containerFactory = "queueListenerFactory")
+    public void receiveFromQueue(String message) {
+        System.out.println("Queue Consumer received: " + message);
+    }
+}
+
+@Component
+public class TibcoTopicConsumer1 {
+
+    @JmsListener(destination = "MARKET.TOPIC", containerFactory = "topicListenerFactory")
+    public void receiveFromTopic1(String message) {
+        System.out.println("Topic Consumer 1 received: " + message);
+    }
+}
+
+@Component
+public class TibcoTopicConsumer2 {
+
+    @JmsListener(destination = "MARKET.TOPIC", containerFactory = "topicListenerFactory")
+    public void receiveFromTopic2(String message) {
+        System.out.println("Topic Consumer 2 received: " + message);
+    }
+}
+
+
+---
+
+✅ Application Runner (Test)
+
+@SpringBootApplication
+public class TibcoApp implements CommandLineRunner {
+
+    private final TibcoProducer producer;
+
+    public TibcoApp(TibcoProducer producer) {
+        this.producer = producer;
+    }
+
+    public static void main(String[] args) {
+        SpringApplication.run(TibcoApp.class, args);
+    }
+
+    @Override
+    public void run(String... args) {
+        producer.sendToQueue("Order-101: New Order Placed");
+        producer.sendToTopic("Stock-XYZ price = 250");
+    }
+}
+
+
+---
+
+🔹 4. What Happens?
+
+Queue Case
+
+Message → ORDERS.QUEUE
+
+If only 1 consumer → it gets the message.
+
+If multiple consumers → EMS delivers each message to exactly one consumer (load-balanced).
+
+
+Topic Case
+
+Message → MARKET.TOPIC
+
+Both TibcoTopicConsumer1 and TibcoTopicConsumer2 get the same message.
+
+So every subscriber sees the same broadcast.
+
+
+
+
+---
+
+✅ Summary:
+
+Tibco EMS Queue = one consumer gets each message.
+
+Tibco EMS Topic = all consumers get the message.
+
+Unlike Kafka, Tibco EMS doesn’t use partitions; instead it relies on queue/topic semantics.
+
+
+
+---
+
+Do you want me to also add an explanation of Durable Subscriber in Topic (similar to Kafka consumer group offset retention), so that even if Droid is down, it still gets missed messages when it comes back?
+
+
+
