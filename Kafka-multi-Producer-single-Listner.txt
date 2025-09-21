@@ -165,3 +165,167 @@ Then assign each listener to the correct factory.
 
 Do you also want me to extend this example so that one listener consumes from multiple topics inside the same cluster, while another listens to a different cluster? That’s a very common real-world pattern.
 
+
+Excellent question 👌 — this is exactly the real integration challenge.
+You are right:
+
+Upstream Kafka might be Cluster A.
+
+DROID internal Kafka might be Cluster B (Confluent Kafka backbone).
+
+TIBCO EMS is a completely different technology (JMS).
+
+
+So how does DROID consume from both?
+👉 By using multiple consumer configurations inside Spring Boot.
+
+
+---
+
+🔹 Case 1: Consuming from Multiple Kafka Clusters
+
+Spring Kafka lets you define multiple ConsumerFactory + KafkaListenerContainerFactory beans.
+
+Example:
+
+@Configuration
+public class KafkaConfig {
+
+    @Bean
+    public Map<String, Object> kafkaClusterAProps() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "clusterA:9092");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "droid-clusterA-consumer");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        return props;
+    }
+
+    @Bean
+    public ConsumerFactory<String, String> kafkaClusterAConsumerFactory() {
+        return new DefaultKafkaConsumerFactory<>(kafkaClusterAProps());
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaClusterAListenerContainerFactory() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(kafkaClusterAConsumerFactory());
+        return factory;
+    }
+
+    // --- Cluster B (internal DROID Kafka) ---
+    @Bean
+    public Map<String, Object> kafkaClusterBProps() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "clusterB:9092");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "droid-clusterB-consumer");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        return props;
+    }
+
+    @Bean
+    public ConsumerFactory<String, String> kafkaClusterBConsumerFactory() {
+        return new DefaultKafkaConsumerFactory<>(kafkaClusterBProps());
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, String> kafkaClusterBListenerContainerFactory() {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(kafkaClusterBConsumerFactory());
+        return factory;
+    }
+}
+
+Then in your consumers:
+
+@Service
+public class MultiClusterConsumer {
+
+    @KafkaListener(
+        topics = "trade-events",
+        containerFactory = "kafkaClusterAListenerContainerFactory"
+    )
+    public void consumeFromClusterA(String message) {
+        System.out.println("Received from Kafka Cluster A: " + message);
+        // normalize & forward to internal DROID Kafka (Cluster B)
+    }
+
+    @KafkaListener(
+        topics = "droid-normalized-trades",
+        containerFactory = "kafkaClusterBListenerContainerFactory"
+    )
+    public void consumeFromClusterB(String message) {
+        System.out.println("Received from internal DROID Kafka Cluster B: " + message);
+    }
+}
+
+👉 This way, DROID can consume from external Kafka (Cluster A) and republish to internal Kafka (Cluster B).
+
+
+---
+
+🔹 Case 2: Consuming from TIBCO EMS (JMS)
+
+TIBCO EMS is JMS-based. In Spring Boot you configure a JmsListenerContainerFactory:
+
+@Configuration
+public class EmsConfig {
+
+    @Bean
+    public ConnectionFactory emsConnectionFactory() {
+        // TIBCO EMS connection setup
+        return new com.tibco.tibjms.TibjmsConnectionFactory("tcp://ems-server:7222");
+    }
+
+    @Bean
+    public JmsListenerContainerFactory<?> emsListenerContainerFactory(ConnectionFactory emsConnectionFactory) {
+        DefaultJmsListenerContainerFactory factory = new DefaultJmsListenerContainerFactory();
+        factory.setConnectionFactory(emsConnectionFactory);
+        return factory;
+    }
+}
+
+Consumer:
+
+@Service
+public class EmsConsumer {
+
+    @JmsListener(destination = "EMS.TRADE.QUEUE", containerFactory = "emsListenerContainerFactory")
+    public void consumeFromEms(String message) {
+        System.out.println("Received from EMS: " + message);
+        // normalize & forward to DROID Kafka (Cluster B)
+    }
+}
+
+
+---
+
+🔹 How it all fits in DROID
+
+1. External Kafka cluster (Cluster A) → DROID consumer reads → republishes normalized event to internal Kafka (Cluster B).
+
+
+2. EMS queue → DROID JMS consumer reads → republishes normalized event to internal Kafka (Cluster B).
+
+
+3. Internal DROID Kafka (Cluster B) = single backbone for all downstream systems (Oracle, ES, S3, APIs).
+
+
+
+
+---
+
+✅ So you are right — DROID must know connection details for each cluster/system and configure a separate listener container factory.
+
+⚡ Key takeaway:
+
+DROID acts as a bridge between heterogeneous upstreams and a unified downstream Kafka backbone.
+
+
+
+---
+
+
+
+
