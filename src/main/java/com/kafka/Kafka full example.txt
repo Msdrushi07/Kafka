@@ -418,7 +418,14 @@ Problem: Messages acknowledged too early.
 Solution:
 
 Set acks=all for strong durability.
-
+acks=all ensures that a message is acknowledged only after it is written to the leader partition and successfully replicated to all in-sync replicas. It provides the highest durability guarantee but increases latency.
+Why acks=all alone cannot guarantee durability?
+Answer:
+Because if only one replica remains in ISR, the leader can acknowledge the write even though the message exists on only one broker. Setting min.insync.replicas ensures a minimum number of replicas must acknowledge the write.
+replication.factor = 3
+acks = all
+min.insync.replicas = 2
+enable.idempotence = true
 Enable idempotence to avoid duplicates:
 
 spring.kafka.producer.properties.enable.idempotence: true
