@@ -492,7 +492,13 @@ Problem: Messages reprocessed or skipped.
 Solution:
 
 Disable auto-commit and use manual acknowledgment:
-
+spring:
+  kafka:
+    consumer:
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+auto-offset-reset defines where the consumer should start reading if no committed offset exists, while enable.auto.commit controls whether offsets are committed automatically.
+auto offset reset defines how to read messages and enable auto commit how to acknowledge messages 
 @KafkaListener(topics = "orders")
 public void listen(String msg, Acknowledgment ack) {
     try {
